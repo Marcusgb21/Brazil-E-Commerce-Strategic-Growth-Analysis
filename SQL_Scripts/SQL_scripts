@@ -1,1 +1,557 @@
+/*Environment Setup */
 
+CREATE TABLE customers AS
+SELECT *
+FROM read_csv_auto('data/olist_customers_dataset.csv')
+CREATE TABLE geolocation AS
+SELECT *
+FROM read_csv_auto('data/olist_geolocation_dataset.csv');
+
+CREATE TABLE order_items AS
+SELECT *
+FROM read_csv_auto('data/olist_order_items_dataset.csv');
+
+CREATE TABLE order_payments AS
+SELECT *
+FROM read_csv_auto('data/olist_order_payments_dataset.csv');
+
+CREATE TABLE order_reviews AS
+SELECT *
+FROM read_csv_auto('data/olist_order_reviews_dataset.csv');
+
+CREATE TABLE orders AS
+SELECT *
+FROM read_csv_auto('data/olist_orders_dataset.csv');
+
+CREATE TABLE products AS
+SELECT *
+FROM read_csv_auto('data/olist_products_dataset.csv');
+
+CREATE TABLE sellers AS
+SELECT *
+FROM read_csv_auto('data/olist_sellers_dataset.csv');
+
+CREATE TABLE cat_names AS
+SELECT *
+FROM read_csv_auto('data/product_category_name_translation.csv');
+
+----------------------------------------------------------------------------------------------------------
+
+SELECT 'cat_names' AS table_name, COUNT(*) AS row_count FROM main.cat_names
+UNION ALL
+SELECT 'customers', COUNT(*) FROM main.customers
+UNION ALL
+SELECT 'geolocation', COUNT(*) FROM main.geolocation
+UNION ALL
+SELECT 'order_items', COUNT(*) FROM main.order_items
+UNION ALL
+SELECT 'orders', COUNT(*) FROM main.orders
+UNION ALL
+SELECT 'order_payments', COUNT(*) FROM main.order_payments
+UNION ALL
+SELECT 'products', COUNT(*) FROM main.products
+UNION ALL
+SELECT 'order_reviews', COUNT(*) FROM main.order_reviews
+UNION ALL
+SELECT 'sellers', COUNT(*) FROM main.sellers;
+
+----------------------------------------------------------------------------------------------------------
+/* Check duplicates for orders */
+SELECT order_id, COUNT(*) AS n
+FROM main.orders
+GROUP BY order_id
+HAVING COUNT(*) > 1;
+
+/* Check duplicates for order_payments */
+SELECT order_id, payment_sequential, COUNT(*) AS n
+FROM main.order_payments
+GROUP BY order_id, payment_sequential
+HAVING COUNT(*) > 1;
+
+/* Check duplicates for order_items */
+SELECT order_id, order_item_id, COUNT(*) AS n
+FROM main.order_items
+GROUP BY order_id, order_item_id
+HAVING COUNT(*) > 1;
+
+--------------------------------------------------------------------------------------------------------
+
+CREATE VIEW clean_orders AS
+SELECT * FROM main.orders;
+
+CREATE VIEW clean_payments AS
+SELECT * FROM main.order_payments;
+
+CREATE VIEW clean_order_items AS
+SELECT * FROM main.order_items;
+
+----------------------------------------------------------------------------------------------------------
+
+/* Bucket 1: Revenue and Growth
+
+Tables used: clean_orders and clean_order_items
+*/
+
+KPI 1.1 Monthly Revenue Trend
+/* Check for nulls or negative prices exist */
+
+SELECT 
+  COUNT(*) AS total_rows,
+  SUM(price IS NULL OR price < 0) AS bad_price,
+  SUM(o.order_approved_at IS NULL) AS rows_missing_date
+
+FROM clean_orders AS o
+JOIN clean_order_items AS oi ON o.order_id=oi.order_id;
+
+CREATE OR REPLACE VIEW kpi1_clean_orders AS
+SELECT *
+FROM clean_orders
+WHERE order_approved_at IS NOT NULL;
+
+/*KPI 1: Monthly Revenue Trend */
+
+WITH order_totals AS (
+  SELECT
+    o.order_id,
+    SUM(oi.price) AS order_revenue
+  FROM clean_orders o
+  JOIN clean_order_items oi ON o.order_id = oi.order_id
+  GROUP BY o.order_id
+)
+
+SELECT 
+  DATE_TRUNC('month', co.order_approved_at) AS month,
+  ROUND(SUM(t.order_revenue),2) AS total_revenue
+FROM kpi1_clean_orders co
+JOIN order_totals t ON co.order_id = t.order_id
+GROUP BY month
+ORDER BY month;
+
+/* Results description 
+-- Sales steadily ramp up through 2017, with the highest peak in November (995k), dip in early 2018
+-- then rebounds in Q2 sharply passing R$1m in April-May 2018.
+-- The sustained climb through mid-2018 signals healthy demand growth ahead of the year-end peak season.
+*/
+
+----------------------------------------------------------------------------------------------------------------
+KPI 1.2: Year-over-year growth
+/* Year-over-year growth */
+
+--Annual Revenue
+
+WITH annual_rev AS (
+SELECT
+  EXTRACT(year FROM co.order_approved_at) AS yr, --calendar year
+  ROUND(SUM(oi.price), 2) AS total_revenue
+  FROM kpi1_clean_orders co
+  JOIN clean_order_items oi ON co.order_id = oi.order_id
+  GROUP BY yr
+)
+
+--YoY % change: (current - prior) /prior
+
+SELECT
+  yr AS year,
+  total_revenue,
+  ROUND(
+    100 * (total_revenue
+          - LAG(total_revenue) OVER (ORDER BY yr))
+          / NULLIF(LAG(total_revenue) OVER (ORDER BY yr), 0), 2
+  ) AS yoy_growth_pct
+FROM annual_rev
+ORDER BY yr;
+
+/* Results description
+-- 12,000% increase throughout 2017
+-- but only a 20% increase in 2018. The reason is that the 2018 data is only up until September, which is incomplete.
+-- It would be better to only compare it for Jan to Aug only
+*/
+
+--Annual Revenue for Jan to Aug only (2017 & 2018)
+
+WITH annual_rev AS (
+SELECT
+  EXTRACT(year FROM co.order_approved_at) AS yr, --calendar year
+  ROUND(SUM(oi.price), 2) AS total_revenue
+  FROM kpi1_clean_orders co
+  JOIN clean_order_items oi ON co.order_id = oi.order_id
+  WHERE EXTRACT(month FROM co.order_approved_at) BETWEEN 1 AND 8 --jan to Aug only
+  AND EXTRACT(year FROM co.order_approved_at) in (2017,2018) --2017-2018 only
+  GROUP BY yr
+)
+--YoY (2018 - 2017) / 2017
+
+SELECT
+  yr AS year,
+  total_revenue,
+  ROUND(
+    100 * (total_revenue
+          - LAG(total_revenue) OVER (ORDER BY yr))
+          / NULLIF(LAG(total_revenue) OVER (ORDER BY yr), 0), 2
+  ) AS yoy_growth_pct
+FROM annual_rev
+ORDER BY yr;
+
+/* Results discussion
+-- As we can see here, this is a fairer comparison with a growth rate 138% from 2017 to 2018
+-- Revenue from 2017 to 2018 almost doubled versus the same period in 2017,
+-- Rising from 3.1m to 7.39m ~ a 138% increase
+-- This surge signals that the platform is scaling rapidly even before Q4 shopping spike.
+
+*/
+
+-----------------------------------------------------------------------------------------------------
+
+/* KPI 1.3: Average Order Value (AOV) Trend*/
+
+-- Monthly order totals
+
+WITH order_totals AS (
+  SELECT
+    co.order_id,
+    SUM(oi.price) AS order_revenue,
+    DATE_TRUNC('month', co.order_approved_at) AS month
+  FROM kpi1_clean_orders co
+  JOIN clean_order_items oi ON co.order_id = oi.order_id
+  GROUP BY co.order_id, month
+)
+
+-- Average order value per month
+SELECT 
+  month,
+  ROUND(AVG(order_revenue), 2) AS avg_order_value
+FROM order_totals
+GROUP BY month
+ORDER BY month;
+
+/* KPI 1.3 results description
+-- AOV stays stable throughout 2016-2018 hovering between R$125 - R$150 with only mild month-to-month noise
+-- The relatively flat trend suggests revenue gains are driven by order volume growth rather than shoppers spending more per transaction
+
+Suggestion: One way to increase the AOV is to consider adding a "Free shipping fee" threshold at $160 to nudge the average higher
+*/
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+/* Bucket #2 - Product & Category Performance
+
+Tables used: clean_order, clean_order_items, products
+*/
+/*KPI 2.1 Revenue vs Volume Matrix by Category*/
+/*How much revenue and how many items did each category sell? */
+-- STEP 1
+WITH category_sales AS(
+SELECT
+  p.product_category_name AS category,
+  ROUND(SUM(oi.price),2) AS total_revenue,
+  COUNT(oi.order_id) AS units_sold,
+  FROM clean_order_items oi
+JOIN products p ON oi.product_id = p.product_id
+WHERE p.product_category_name IS NOT NULL
+GROUP BY category
+)
+
+SELECT 
+  category,
+  total_revenue,
+  units_sold,
+  -- overall averages (benchmarks)
+  AVG(total_revenue) OVER () AS avg_revenue_overall,
+  AVG(units_sold) OVER () AS avg_units_sold_overall,
+  CASE
+    WHEN total_revenue >= ROUND(avg_revenue_overall,2)
+      AND units_sold >= avg_units_sold_overall
+      THEN 'High Revenue / High Volume'
+    WHEN total_revenue >= ROUND(avg_revenue_overall,2)
+      AND units_sold < avg_units_sold_overall
+      THEN 'High Revenue / Low Volume'
+    WHEN total_revenue < ROUND(avg_revenue_overall, 2)
+      AND units_sold > avg_units_sold_overall
+      THEN 'Low Revenue / High Volume'
+      ELSE 'Low Revenue / Low Volume'
+    END AS category_segment
+FROM category_sales;
+
+/* KPI 2.1 Revenue vs Volume Matrix Overview 
+Categories were segmented using a Revenue vs Volume matrix, where:
+Revenue = total sales value per category
+Volume = total units sold per category
+
+Benchmarks were set using overall average revenue and average units sold
+
+Each category was classified into one of four strategic segments:
+High Revenue / High Volume
+High Revenue / Low Volume
+Low Revenue / High Volume
+Low Revenue / Low Volume
+*/
+
+/*
+High Revenue / High Volume (Core Business Drivers)
+Examples:
+beleza_saude
+cama_mesa_banho
+esporte_lazer
+informatica_acessorios
+relogios_presentes
+utilidades_domesticas
+
+Insight:
+These categories consistently generate above-average revenue and sales volume, making them the primary revenue engines of the platform.
+Implication:
+These categories should be prioritized for inventory availability, promotions, and supply chain reliability.
+Any disruption here would have a significant impact on total revenue.
+*/
+
+/*
+High Revenue / Low Volume (Premium or Niche Categories)
+Examples:
+pcs
+instrumentos_musicais
+eletroportateis
+Insight:
+Despite lower sales volume, these categories generate high total revenue, indicating higher-priced or premium products.
+
+Implication:
+Opportunities exist for upselling, premium positioning, and targeted marketing.
+These categories may benefit from focused campaigns rather than mass promotions.
+*/
+
+/*
+Low Revenue / High Volume (Operational Opportunities)
+Examples:
+eletronicos
+fashion_bolsas_e_acessorios
+Insight:
+These categories sell above-average units but fail to generate proportional revenue, suggesting low margins or low average selling prices.
+Implication:
+Potential strategies include price optimization, bundling, or cost reduction.
+Improving margins here could significantly boost total revenue due to high volume.
+*/
+
+/*
+Low Revenue / Low Volume (Long-Tail Categories)
+Examples:
+flores
+fashion_roupa_infanto_juvenil
+seguros_e_servicos
+cds_dvds_musicais
+
+Insight:
+These categories contribute minimally to both revenue and sales volume, forming the platform’s long tail.
+
+Implication:
+These categories should be reviewed for portfolio rationalization.
+Consider delisting, reducing inventory, or keeping them only for catalog completeness.
+*/
+
+/* Business Recommendations
+Segment	Recommendation
+High Revenue / High Volume -> 	Protect and optimize operations; ensure availability
+High Revenue / Low Volume	-> Focus on premium marketing and upselling
+Low Revenue / High Volume	-> Improve pricing, bundling, or cost efficiency
+Low Revenue / Low Volume	-> Evaluate for removal or deprioritization
+*/
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+/* KPI 2.2 Category Growth Rate */
+
+-- Tables used: clean_order_items, products, clean_orders
+/* Step 1. Get the category total revenue per month */
+
+WITH monthly_category_sales AS(
+  SELECT
+    p.product_category_name AS category,
+    ROUND(SUM(oi.price),2) AS total_revenue,
+    DATE_TRUNC('month', o.order_approved_at) AS month
+  FROM clean_order_items oi
+  JOIN products p ON oi.product_id = p.product_id
+  JOIN clean_orders o ON oi.order_id = o.order_id
+  WHERE EXTRACT(month FROM o.order_approved_at) BETWEEN 1 AND 8 --jan to aug only
+  AND EXTRACT(year FROM o.order_approved_at) in (2017,2018) --2017-2018 only
+  AND p.product_category_name IS NOT NULL
+  GROUP BY category, month
+),
+
+YoY_calc AS (
+  SELECT
+    category,
+    month,
+    total_revenue AS current_rev,
+    LAG(total_revenue, 12) OVER (PARTITION BY category ORDER BY month) AS prev_year_rev
+  FROM monthly_category_sales
+)
+
+SELECT 
+  category,
+  EXTRACT(MONTH from month) AS month_number,
+  current_rev,
+  prev_year_rev,
+  ROUND(
+    100 *  (current_rev - prev_year_rev) / NULLIF(prev_year_rev, 0), 2) AS yoy_growth_pct,
+  CASE 
+        WHEN (100 * (current_rev - prev_year_rev) / NULLIF(prev_year_rev, 0)) > 50 THEN '🚀 High Growth'
+        WHEN (100 * (current_rev - prev_year_rev) / NULLIF(prev_year_rev, 0)) BETWEEN 0 AND 50 THEN '📈 Stable'
+        ELSE '⚠️ Declining'
+    END AS performance_status
+FROM YoY_calc
+WHERE prev_year_rev IS NOT NULL
+AND current_rev > 500
+ORDER BY current_rev DESC;
+
+/* Category Growth Rate Observations
+The High-Volume "Stars"
+These categories are your revenue anchors. They aren't just growing by percentage; they are generating hundreds of thousands in absolute revenue, making them your most valuable assets.
+Beleza e Saúde (Health & Beauty): This is your strongest category. It generated over $122k in August 2018, growing at a staggering 174% YoY. This suggests high customer loyalty and successful repeat-purchase cycles.
+Relógios e Presentes (Watches & Gifts): With revenues hitting $122k and maintaining 1,000%+ growth, this segment is thriving. This indicates a very successful premium product strategy.
+Cama, Mesa e Banho (Bed, Bath & Table): A massive volume driver that scaled to $74k in May, maintaining a healthy 364% growth rate.
+
+2. The Explosive "Newcomers"
+The categories at the top of your list (20,000%+ growth) represent successful new market entries rather than just steady growth.
+Construção e Ferramentas (Construction Tools): This category went from a negligible $99 in 2017 to over $23k in 2018. This is a clear signal that your expansion into the professional/DIY market is working.
+Agro, Indústria e Comércio: Similar to construction, this segment scaled from double-digit revenue to nearly $8k/month, showing strength in B2B supplies.
+
+3. Critical Red Flags
+These categories are showing severe decline and likely require a change in strategy or inventory liquidation.
+DVDs and Blu-Ray: Consistently down by 79% to 94%. This reflects the global shift toward streaming and suggests you should stop holding this inventory.
+Marketplace: Significant drops (up to -95%) often suggest that your first-party sales are cannibalizing third-party listings—usually a good sign for profit margins, even if the specific "Marketplace" revenue line looks bad.
+
+Recommendations 
+Reallocate marketing budget away from "Declining" categories and move it into Beleza e Saúde and Relógios. 
+These categories have proven they can handle massive volume without the growth rate slowing down.
+*/
+
+--------------------------------------------------------------------------------------------------------------------------------------
+/* KPI 2.3 Inventory & Revenue Concentration (ABC Analysis)
+
+Tables used: clean_order_items, products
+*/
+/*Step 1. What is the total revenue for each category */
+
+WITH category_totals AS(
+SELECT
+  p.product_category_name AS category,
+  ROUND(SUM(oi.price),2) AS total_revenue
+FROM clean_order_items oi
+JOIN products p ON oi.product_id = p.product_id
+WHERE p.product_category_name IS NOT NULL
+GROUP BY category
+
+),
+
+cumulative_calc AS (
+SELECT
+  category,
+  total_revenue,
+  ROUND((total_revenue / SUM(total_revenue) OVER()) * 100, 2) AS pct_contribution,
+  ROUND(
+    SUM(total_revenue) OVER(ORDER BY total_revenue DESC) 
+    / SUM(total_revenue) OVER() * 100, 
+    2
+  ) AS cumulative_pct
+FROM category_totals
+)
+
+SELECT
+  category,
+  ROUND(total_revenue, 2) AS revenue,
+  pct_contribution,
+  cumulative_pct,
+  CASE 
+        WHEN cumulative_pct <= 70 THEN 'Class A (Core)'
+        WHEN cumulative_pct <= 90 THEN 'Class B (Supporting)'
+        ELSE 'Class C (Long-Tail)'
+    END AS strategic_priority
+FROM cumulative_calc
+ORDER BY total_revenue DESC;
+
+/*Category breakdown
+Class A (Core): Only 12 categories (from beleza_saude to bebes). They represent less than 20% of your catalog but nearly 70% of your wealth.
+
+Class B (Supporting): These 12 categories (from perfumaria to construcao_ferramentas_construcao) take you from 70% to 90%. They are the "middle class" of your products.
+
+Class C (Long-Tail): These are the remaining 49 categories. Combined, they contribute only 10% of your revenue.
+
+KEY INSIGHTS
+High Concentration Risk: Our top 3 categories alone account for 26% of all revenue. We must ensure we have stable supplier relationships and competitive pricing for Beleza Saúde, Relógios, and Cama/Mesa.
+The "Efficiency" Opportunity: We have 49 categories (Class C) that contribute very little to the bottom line. We should investigate if the operational cost (warehousing, listing, customer support) for these niche items exceeds the 10% revenue they bring in.
+Growth Potential in Class B: Categories like Telefonia and PCs are in Class B. Since these are usually high-ticket items, small improvements in their conversion rates could easily push them into Class A.
+*/
+
+-----------------------------------------------------------------------------------------------------------------------------------
+/* Bucket 3: Customer & Geographic Insights 
+
+Tables used: customers, clean_orders, clean_order_items
+*/
+/*KPI 3.1: Average Order Value by City 
+          High Volume / Low AOV cities
+          Top cities driving disproportionate revenue
+*/
+
+WITH order_revenue AS(
+SELECT
+   c.customer_city AS city,
+   o.order_id AS id,
+   c.customer_state AS state,
+  SUM(oi.price) AS revenue
+  FROM clean_orders o
+JOIN customers c ON o.customer_id = c.customer_id
+JOIN clean_order_items oi ON o.order_id = oi.order_id
+WHERE c.customer_city IS NOT NULL
+GROUP BY city, id, state
+
+)
+
+SELECT 
+  city,
+  state,
+  COUNT(id) AS order_count,
+  ROUND(SUM(revenue),2) AS total_city_rev,
+  ROUND(AVG(revenue), 2) AS AOV,
+  ROUND(100.0 * SUM(revenue) / SUM(SUM(revenue)) OVER(), 2) AS pct_of_total_revenue,
+  CASE 
+        WHEN AOV > 170 THEN 'Premium Market'
+        WHEN AOV BETWEEN 130 AND 170 THEN 'Mass Market'
+        ELSE 'Value Market'
+    END AS city_tier,
+    CASE 
+        WHEN order_count > 1000 THEN 'High Volume'
+        ELSE 'Developing Volume'
+    END AS volume_status
+FROM order_revenue
+GROUP BY city, state
+HAVING order_count >= 100
+ORDER BY total_city_rev DESC;
+
+/*
+Key Findings: Market Segmentation Analysis
+Based on the AOV and Volume distribution, the business is currently operating in three distinct market realities. While São Paulo drives the absolute volume, the highest individual customer value is found in emerging Premium Markets in the Northeast and interior regions.
+
+Strategic Recommendations
+1. The "Affluent Growth" Play (Premium / Developing)
+Target Cities: Divinópolis, João Pessoa, Porto Velho.
+
+The Recommendation: Launch a "Premium Tier" Loyalty Program.
+
+Why: These cities have an AOV 40-100% higher than the average. These customers aren't price-shopping; they are buying high-ticket items.
+
+Action: Partner with "Class B" high-ticket brands (Electronics/Watches) for exclusive early-access launches in these specific zip codes.
+
+2. The "Efficiency" Play (Value / High Volume)
+Target Cities: São Paulo, Belo Horizonte, Guarulhos.
+
+The Recommendation: Implement "Basket-Building" Incentives (e.g., Add $20 more for Free Shipping).
+
+Why: These are high-frequency hubs with lower individual spend. The cost of shipping many small orders is higher than shipping fewer, larger orders.
+
+Action: Use an A/B test on the checkout page for these cities specifically, offering a small discount if the user reaches a $140 threshold (just above their current $124-129 AOV).
+
+3. The "Market Leader" Play (Mass Market / High Volume)
+Target Cities: Rio de Janeiro, Salvador, Brasília.
+
+The Recommendation: Optimize Last-Mile Delivery and Local Warehousing.
+
+Why: These cities represent the perfect balance of scale and healthy margins. They are your most profitable "Cash Cows."
+
+Action: Invest in local distribution centers (if not already present) to reduce delivery time, as these customers represent the largest predictable revenue stream.
+*/
