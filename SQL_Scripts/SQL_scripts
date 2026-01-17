@@ -1,3 +1,9 @@
+/*******************************************************************************
+TECHNICAL NOTE: This analysis was executed using DuckDB. 
+DuckDB was selected for its OLAP-optimized engine, enabling high-speed 
+aggregations and sub-second query performance on the 100k+ record Olist dataset.
+*******************************************************************************/
+
 /*Environment Setup */
 
 CREATE TABLE customers AS
