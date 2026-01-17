@@ -13,3 +13,14 @@ This analysis utilizes the Brazilian E-Commerce Public Dataset by Olist, availab
 4. Run CMD in the directory line where the folder is located
 5. Type duckdb 'project-name'.db -ui
 6. It will then move you to Duckdb to reproduce all KPIs and views. Ensure that the 'Environment Setup' section is executed first to ingest the CSVs into tables.
+
+
+Key Performance Indicators (KPIs):
+
+Revenue & Growth: Analyzed a 138% YoY revenue surge and a 203.9% growth momentum, validating the platform's ability to scale rapidly.
+
+Product & Category Performance: Optimized a 70+ category portfolio by identifying high-margin anchors like 'Relógios' through 2x2 Matrix analysis, while utilizing ABC Pareto modeling to prove that 80% of revenue is concentrated in just 16 core categories, including hyper-growth leaders like 'Agro Indústria'.
+
+Regional Intelligence: Mapping national market reach to reveal a strategic divide between the Southeast 'Volume Anchor' (São Paulo)—which drives 32% of total orders—and Northeast 'Premium Clusters' (João Pessoa/Belém), where Average Order Values (AOV) reach $209.31, or 68% above the national average.
+
+[📊 View the Interactive Executive Portal here](https://public.tableau.com/views/BrazilEcommerce_17680444562380/BrazilE-CommerceStrategicGrowthAnalysis?:language=en-US&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link)
